@@ -4,6 +4,7 @@ context_prompt.txt
 *_context.txt
 *_codebase.txt
 tmpclaude-*
+codebase_dump.txt
 
 # === OS ===
 .DS_Store
@@ -22,6 +23,13 @@ Desktop.ini
 *.tmp
 *.temp
 *.log
+
+# === Build outputs / packaged apps ===
+*.app/
+*.dSYM/
+bindings/*.swift
+bindings/*.h
+bindings/*.modulemap
 
 # === Environment / Secrets ===
 .env
@@ -46,4 +54,8 @@ credentials.json
 # === Rust ===
 target/
 **/*.rs.bk
+Cargo.lock
 
+# === Planning / local docs ===
+plans/
+*.pdf

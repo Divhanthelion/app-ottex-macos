@@ -3,6 +3,15 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use std::thread;
 use std::time::Duration;
 
+/// Return the platform modifier key (Cmd on macOS, Ctrl elsewhere).
+fn platform_modifier() -> Key {
+    if cfg!(target_os = "macos") {
+        Key::Meta
+    } else {
+        Key::Control
+    }
+}
+
 /// Input simulator for typing text and keyboard shortcuts
 pub struct InputSimulator {
     enigo: Enigo,
@@ -18,26 +27,43 @@ impl InputSimulator {
 
     /// Type the given text as keyboard input
     pub fn type_text(&mut self, text: &str) -> Result<()> {
-        log::info!("Typing {} characters", text.len());
+        log::info!("Typing {} characters via clipboard", text.len());
 
         // Small delay before typing to ensure focus is correct
         thread::sleep(Duration::from_millis(100));
 
-        self.enigo
-            .text(text)
-            .map_err(|e| anyhow::anyhow!("Failed to type text: {:?}", e))?;
+        // Use clipboard paste instead of simulated typing for better reliability across apps
+        if let Ok(mut clipboard) = ClipboardManager::new() {
+            if let Err(e) = clipboard.set_text(text) {
+                log::error!("Failed to set clipboard: {:?}", e);
+                // Fallback to enigo.text
+                self.enigo
+                    .text(text)
+                    .map_err(|e| anyhow::anyhow!("Failed to type text: {:?}", e))?;
+            } else {
+                // Wait for clipboard to sync
+                thread::sleep(Duration::from_millis(50));
+                self.paste()?;
+            }
+        } else {
+            // Fallback
+            self.enigo
+                .text(text)
+                .map_err(|e| anyhow::anyhow!("Failed to type text: {:?}", e))?;
+        }
 
         log::info!("Finished typing");
         Ok(())
     }
 
-    /// Simulate Ctrl+C (copy)
+    /// Simulate Copy (Cmd+C on macOS, Ctrl+C elsewhere)
     pub fn copy(&mut self) -> Result<()> {
-        log::debug!("Simulating Ctrl+C");
+        let modifier = platform_modifier();
+        log::debug!("Simulating Copy");
 
         self.enigo
-            .key(Key::Control, Direction::Press)
-            .map_err(|e| anyhow::anyhow!("Failed to press Ctrl: {:?}", e))?;
+            .key(modifier, Direction::Press)
+            .map_err(|e| anyhow::anyhow!("Failed to press modifier: {:?}", e))?;
 
         thread::sleep(Duration::from_millis(50));
 
@@ -48,21 +74,22 @@ impl InputSimulator {
         thread::sleep(Duration::from_millis(50));
 
         self.enigo
-            .key(Key::Control, Direction::Release)
-            .map_err(|e| anyhow::anyhow!("Failed to release Ctrl: {:?}", e))?;
+            .key(modifier, Direction::Release)
+            .map_err(|e| anyhow::anyhow!("Failed to release modifier: {:?}", e))?;
 
         thread::sleep(Duration::from_millis(100));
 
         Ok(())
     }
 
-    /// Simulate Ctrl+V (paste)
+    /// Simulate Paste (Cmd+V on macOS, Ctrl+V elsewhere)
     pub fn paste(&mut self) -> Result<()> {
-        log::debug!("Simulating Ctrl+V");
+        let modifier = platform_modifier();
+        log::debug!("Simulating Paste");
 
         self.enigo
-            .key(Key::Control, Direction::Press)
-            .map_err(|e| anyhow::anyhow!("Failed to press Ctrl: {:?}", e))?;
+            .key(modifier, Direction::Press)
+            .map_err(|e| anyhow::anyhow!("Failed to press modifier: {:?}", e))?;
 
         thread::sleep(Duration::from_millis(50));
 
@@ -73,22 +100,23 @@ impl InputSimulator {
         thread::sleep(Duration::from_millis(50));
 
         self.enigo
-            .key(Key::Control, Direction::Release)
-            .map_err(|e| anyhow::anyhow!("Failed to release Ctrl: {:?}", e))?;
+            .key(modifier, Direction::Release)
+            .map_err(|e| anyhow::anyhow!("Failed to release modifier: {:?}", e))?;
 
         thread::sleep(Duration::from_millis(100));
 
         Ok(())
     }
 
-    /// Simulate Ctrl+A (select all)
+    /// Simulate Select All (Cmd+A on macOS, Ctrl+A elsewhere)
     #[allow(dead_code)]
     pub fn select_all(&mut self) -> Result<()> {
-        log::debug!("Simulating Ctrl+A");
+        let modifier = platform_modifier();
+        log::debug!("Simulating Select All");
 
         self.enigo
-            .key(Key::Control, Direction::Press)
-            .map_err(|e| anyhow::anyhow!("Failed to press Ctrl: {:?}", e))?;
+            .key(modifier, Direction::Press)
+            .map_err(|e| anyhow::anyhow!("Failed to press modifier: {:?}", e))?;
 
         thread::sleep(Duration::from_millis(50));
 
@@ -99,8 +127,8 @@ impl InputSimulator {
         thread::sleep(Duration::from_millis(50));
 
         self.enigo
-            .key(Key::Control, Direction::Release)
-            .map_err(|e| anyhow::anyhow!("Failed to release Ctrl: {:?}", e))?;
+            .key(modifier, Direction::Release)
+            .map_err(|e| anyhow::anyhow!("Failed to release modifier: {:?}", e))?;
 
         thread::sleep(Duration::from_millis(100));
 
@@ -115,8 +143,7 @@ pub struct ClipboardManager {
 
 impl ClipboardManager {
     pub fn new() -> Result<Self> {
-        let clipboard = arboard::Clipboard::new()
-            .context("Failed to access clipboard")?;
+        let clipboard = arboard::Clipboard::new().context("Failed to access clipboard")?;
 
         Ok(Self { clipboard })
     }

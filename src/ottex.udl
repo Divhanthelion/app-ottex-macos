@@ -1,0 +1,32 @@
+namespace ottex {
+    void init_logging();
+};
+
+dictionary EngineConfig {
+    string whisper_repo_id;
+    string whisper_revision;
+};
+
+[Error]
+enum OttexError {
+    "SetupFailed",
+    "RecordingFailed",
+    "InferenceFailed",
+    "GeneralError"
+};
+
+interface OttexEngine {
+    constructor(EngineConfig config);
+    
+    [Throws=OttexError, Async]
+    void load_models();
+    
+    [Throws=OttexError]
+    void start_recording();
+    
+    [Throws=OttexError, Async]
+    string stop_and_transcribe();
+    
+    [Throws=OttexError]
+    void type_text(string text);
+};

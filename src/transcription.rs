@@ -2,38 +2,101 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
-use crate::config::Config;
+use crate::config::{Config, TranscriptionStrategy};
+use crate::inference::InferenceSupervisor;
+use crate::retry::{is_retryable_error, retry_with_backoff};
 
 /// Transcription service that handles multiple providers
 pub struct TranscriptionService {
     client: Client,
     config: Config,
+    inference_supervisor: Option<std::sync::Arc<InferenceSupervisor>>,
 }
 
 impl TranscriptionService {
-    pub fn new(config: Config) -> Self {
+    pub fn new(
+        config: Config,
+        inference_supervisor: Option<std::sync::Arc<InferenceSupervisor>>,
+    ) -> Self {
         Self {
             client: Client::new(),
             config,
+            inference_supervisor,
         }
     }
 
-    /// Transcribe audio using the configured provider
-    pub async fn transcribe(&self, wav_bytes: &[u8]) -> Result<String> {
+    /// Transcribe audio using the configured provider with retry.
+    /// `wav_bytes` is used for cloud providers; `audio_f32_16khz` is used for embedded.
+    pub async fn transcribe(
+        &self,
+        wav_bytes: &[u8],
+        audio_f32_16khz: Option<Vec<f32>>,
+    ) -> Result<String> {
         let provider = &self.config.transcription.provider;
+        let strategy = self.config.transcription.strategy;
 
         log::info!("Transcribing with provider: {}", provider);
 
-        let result = match provider.as_str() {
-            "google" => self.transcribe_google(wav_bytes).await,
-            "openai" => self.transcribe_openai(wav_bytes).await,
-            "openrouter" => self.transcribe_openrouter(wav_bytes).await,
-            _ => {
-                log::warn!("Unknown provider '{}', falling back to OpenAI", provider);
-                self.transcribe_openai(wav_bytes).await
+        // Handle embedded provider
+        if provider == "embedded" || strategy == TranscriptionStrategy::EmbeddedFirst {
+            if let Some(ref supervisor) = self.inference_supervisor {
+                if let Some(audio) = audio_f32_16khz.clone() {
+                    match supervisor.transcribe(audio).await {
+                        Ok(text) => return Ok(text),
+                        Err(e) => {
+                            if strategy == TranscriptionStrategy::EmbeddedOnly {
+                                return Err(e.context("Embedded transcription failed"));
+                            }
+                            log::warn!(
+                                "Embedded transcription failed: {}, falling back to cloud",
+                                e
+                            );
+                        }
+                    }
+                } else {
+                    log::warn!("No f32 audio available for embedded transcription");
+                    if strategy == TranscriptionStrategy::EmbeddedOnly {
+                        anyhow::bail!("Embedded transcription requires f32 audio data");
+                    }
+                }
+            } else if strategy == TranscriptionStrategy::EmbeddedOnly {
+                anyhow::bail!("Embedded model not loaded");
+            } else {
+                log::warn!("Embedded model not available, falling back to cloud providers");
             }
+        }
+
+        // Cloud/local-server transcription path
+        let cloud_provider = if provider == "embedded" {
+            // If embedded was primary but we fell through, try lmstudio as fallback
+            "lmstudio"
+        } else {
+            provider.as_str()
         };
+
+        let result = retry_with_backoff(
+            3,
+            Duration::from_millis(500),
+            is_retryable_error,
+            || async {
+                match cloud_provider {
+                    "lmstudio" => self.transcribe_local(wav_bytes).await,
+                    "google" => self.transcribe_google(wav_bytes).await,
+                    "openai" => self.transcribe_openai(wav_bytes).await,
+                    "openrouter" => self.transcribe_openrouter(wav_bytes).await,
+                    _ => {
+                        log::warn!(
+                            "Unknown provider '{}', falling back to local",
+                            cloud_provider
+                        );
+                        self.transcribe_local(wav_bytes).await
+                    }
+                }
+            },
+        )
+        .await;
 
         // If primary fails, try fallback
         match result {
@@ -50,7 +113,7 @@ impl TranscriptionService {
         let primary = &self.config.transcription.provider;
 
         // Try providers in order, skipping the primary
-        let fallbacks = ["openai", "openrouter", "google"];
+        let fallbacks = ["lmstudio", "openai", "openrouter", "google"];
 
         for provider in fallbacks {
             if provider == primary {
@@ -58,6 +121,9 @@ impl TranscriptionService {
             }
 
             let result = match provider {
+                "lmstudio" if !self.config.transcription.local_url.is_empty() => {
+                    self.transcribe_local(wav_bytes).await
+                }
                 "google" if !self.config.transcription.google_api_key.is_empty() => {
                     self.transcribe_google(wav_bytes).await
                 }
@@ -77,6 +143,62 @@ impl TranscriptionService {
         }
 
         anyhow::bail!("All transcription providers failed")
+    }
+
+    /// Transcribe using a local OpenAI-compatible server (LM Studio, etc.)
+    async fn transcribe_local(&self, wav_bytes: &[u8]) -> Result<String> {
+        let base_url = &self.config.transcription.local_url;
+        if base_url.is_empty() {
+            anyhow::bail!("Local server URL not configured");
+        }
+
+        let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
+
+        let lang_code = self
+            .config
+            .transcription
+            .language
+            .split('-')
+            .next()
+            .unwrap_or("en")
+            .to_lowercase();
+
+        let form = reqwest::multipart::Form::new()
+            .text("model", self.config.transcription.local_model.clone())
+            .text("language", lang_code)
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(wav_bytes.to_vec())
+                    .file_name("recording.wav")
+                    .mime_str("audio/wav")?,
+            );
+
+        log::info!("Sending transcription to local server at {}", url);
+
+        let response = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .context("Failed to send request to local transcription server")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "Local transcription server error {}: {}",
+                status,
+                error_text
+            );
+        }
+
+        let result: OpenAiTranscriptionResponse = response
+            .json()
+            .await
+            .context("Failed to parse local transcription response")?;
+
+        Ok(result.text)
     }
 
     /// Transcribe using Google Cloud Speech-to-Text API
@@ -142,9 +264,19 @@ impl TranscriptionService {
             anyhow::bail!("OpenAI API key not configured");
         }
 
+        // Extract ISO-639-1 code from language config (e.g., "en-US" -> "en")
+        let lang_code = self
+            .config
+            .transcription
+            .language
+            .split('-')
+            .next()
+            .unwrap_or("en")
+            .to_lowercase();
+
         let form = reqwest::multipart::Form::new()
             .text("model", "whisper-1")
-            .text("language", "en")
+            .text("language", lang_code)
             .part(
                 "file",
                 reqwest::multipart::Part::bytes(wav_bytes.to_vec())

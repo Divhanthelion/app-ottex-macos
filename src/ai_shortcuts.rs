@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::config::Config;
 use crate::input::{ClipboardManager, InputSimulator};
+use crate::retry::{is_retryable_error, retry_with_backoff};
 
 /// AI-powered text transformation shortcuts (like "Fix Grammar")
 pub struct AiShortcuts {
@@ -12,7 +14,7 @@ pub struct AiShortcuts {
 }
 
 /// Available AI shortcut actions
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ShortcutAction {
     FixGrammar,
     MakeConcise,
@@ -25,6 +27,20 @@ pub enum ShortcutAction {
 }
 
 impl ShortcutAction {
+    /// Returns all available shortcut actions.
+    pub fn all() -> &'static [ShortcutAction] {
+        &[
+            ShortcutAction::FixGrammar,
+            ShortcutAction::MakeConcise,
+            ShortcutAction::MakeFormal,
+            ShortcutAction::MakeCasual,
+            ShortcutAction::TranslateToSpanish,
+            ShortcutAction::TranslateToFrench,
+            ShortcutAction::Summarize,
+            ShortcutAction::ExpandText,
+        ]
+    }
+
     pub fn prompt(&self) -> &'static str {
         match self {
             ShortcutAction::FixGrammar => {
@@ -84,69 +100,99 @@ impl AiShortcuts {
         }
     }
 
-    /// Execute an AI shortcut on the currently selected text
-    /// This copies the selection, sends to AI, and pastes the result
+    /// Execute an AI shortcut on the currently selected text.
+    /// This copies the selection, sends to AI, and pastes the result.
     pub async fn execute_shortcut(&self, action: ShortcutAction) -> Result<()> {
         log::info!("Executing AI shortcut: {}", action.name());
 
-        // Create input simulator and clipboard manager
-        let mut input = InputSimulator::new()?;
-        let mut clipboard = ClipboardManager::new()?;
+        // Clipboard/input work must happen on the main thread (not Send).
+        // We do it in blocking sections around the async AI call.
+        let selected_text = tokio::task::spawn_blocking(|| -> Result<(String, Option<String>)> {
+            let mut input = InputSimulator::new()?;
+            let mut clipboard = ClipboardManager::new()?;
 
-        // Save current clipboard content
-        let original_clipboard = clipboard.get_text().ok();
+            let original_clipboard = clipboard.get_text().ok();
+            let before = clipboard.get_text().unwrap_or_default();
 
-        // Copy selected text
-        input.copy()?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+            input.copy()?;
 
-        // Get the copied text
-        let selected_text = clipboard.get_text()
-            .context("No text selected or clipboard empty")?;
+            // Poll clipboard until content changes (up to 500ms)
+            let mut selected = before.clone();
+            for _ in 0..10 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if let Ok(text) = clipboard.get_text() {
+                    if text != before {
+                        selected = text;
+                        break;
+                    }
+                }
+            }
 
-        if selected_text.trim().is_empty() {
-            anyhow::bail!("No text selected");
-        }
+            if selected.trim().is_empty() {
+                anyhow::bail!("No text selected");
+            }
 
-        log::info!("Selected text: {} characters", selected_text.len());
+            Ok((selected, original_clipboard))
+        })
+        .await
+        .context("Spawn blocking failed")??;
 
-        // Process with AI
-        let result = self.process_text(&selected_text, action).await?;
+        let (text, original_clipboard) = selected_text;
+        log::info!("Selected text: {} characters", text.len());
 
+        // Process with AI (async, Send-safe)
+        let result = self.process_text(&text, action).await?;
         log::info!("AI result: {} characters", result.len());
 
-        // Put result in clipboard
-        clipboard.set_text(&result)?;
+        // Paste result back
+        let original = original_clipboard.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut input = InputSimulator::new()?;
+            let mut clipboard = ClipboardManager::new()?;
 
-        // Paste the result (replacing the selection)
-        input.paste()?;
+            clipboard.set_text(&result)?;
+            input.paste()?;
 
-        // Restore original clipboard after a delay
-        if let Some(original) = original_clipboard {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            let _ = clipboard.set_text(&original);
-        }
+            if let Some(orig) = original {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let _ = clipboard.set_text(&orig);
+            }
+            Ok(())
+        })
+        .await
+        .context("Spawn blocking failed")??;
 
         Ok(())
     }
 
-    /// Process text using the configured AI provider
+    /// Process text using the configured AI provider with retry.
     async fn process_text(&self, text: &str, action: ShortcutAction) -> Result<String> {
         let provider = &self.config.ai_shortcuts.provider;
 
-        match provider.as_str() {
-            "openai" => self.process_openai(text, action).await,
-            "openrouter" => self.process_openrouter(text, action).await,
-            _ => {
-                log::warn!("Unknown AI provider '{}', falling back to OpenAI", provider);
-                self.process_openai(text, action).await
-            }
-        }
+        retry_with_backoff(
+            3,
+            Duration::from_millis(500),
+            is_retryable_error,
+            || async {
+                match provider.as_str() {
+                    "lmstudio" => self.process_local(text, action).await,
+                    "openai" => self.process_openai(text, action).await,
+                    "openrouter" => self.process_openrouter(text, action).await,
+                    _ => {
+                        log::warn!("Unknown AI provider '{}', falling back to local", provider);
+                        self.process_local(text, action).await
+                    }
+                }
+            },
+        )
+        .await
     }
 
     /// Process text using OpenAI API
     async fn process_openai(&self, text: &str, action: ShortcutAction) -> Result<String> {
-        let api_key = self.config.get_ai_shortcut_api_key()
+        let api_key = self
+            .config
+            .get_ai_shortcut_api_key()
             .context("No API key configured for AI shortcuts")?;
 
         let request = OpenAiChatRequest {
@@ -195,7 +241,9 @@ impl AiShortcuts {
 
     /// Process text using OpenRouter API
     async fn process_openrouter(&self, text: &str, action: ShortcutAction) -> Result<String> {
-        let api_key = self.config.get_ai_shortcut_api_key()
+        let api_key = self
+            .config
+            .get_ai_shortcut_api_key()
             .context("No API key configured for AI shortcuts")?;
 
         let request = OpenAiChatRequest {
@@ -234,6 +282,60 @@ impl AiShortcuts {
             .json()
             .await
             .context("Failed to parse OpenRouter response")?;
+
+        let content = result
+            .choices
+            .first()
+            .map(|c| c.message.content.clone())
+            .unwrap_or_default();
+
+        Ok(content)
+    }
+
+    /// Process text using a local OpenAI-compatible server (LM Studio, etc.)
+    async fn process_local(&self, text: &str, action: ShortcutAction) -> Result<String> {
+        let base_url = &self.config.ai_shortcuts.local_url;
+        if base_url.is_empty() {
+            anyhow::bail!("Local server URL not configured for AI shortcuts");
+        }
+
+        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+
+        let request = OpenAiChatRequest {
+            model: self.config.ai_shortcuts.model.clone(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".to_string(),
+                    content: action.prompt().to_string(),
+                },
+                ChatMessage {
+                    role: "user".to_string(),
+                    content: text.to_string(),
+                },
+            ],
+            temperature: 0.3,
+        };
+
+        log::info!("Sending AI shortcut to local server at {}", url);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .context("Failed to send request to local AI server")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            anyhow::bail!("Local AI server error {}: {}", status, error_text);
+        }
+
+        let result: OpenAiChatResponse = response
+            .json()
+            .await
+            .context("Failed to parse local AI server response")?;
 
         let content = result
             .choices

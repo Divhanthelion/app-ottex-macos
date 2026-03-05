@@ -1,116 +1,157 @@
-# Ottex - Voice-to-Text for Windows
+# Ottex - Global Voice-to-Text for macOS
 
-A Windows application that provides voice-to-text functionality with AI-powered text shortcuts, built in Rust.
+Ottex is a native macOS dictation app that lets you press a global hotkey, speak, and drop the transcribed text into the currently focused text field in any app. It uses on-device Whisper inference with Metal acceleration, a Rust core, and a SwiftUI frontend.
 
 ## Features
 
-- **Voice-to-Text**: Press `Alt+Space` to start recording, release to transcribe and type
-- **AI Shortcuts**: Press `Ctrl+Shift+R` to apply "Fix Grammar" to selected text
-- **System Tray**: Runs quietly in the background with tray icon access
-- **Multiple Providers**: Supports Google Speech-to-Text, OpenAI Whisper, and OpenRouter
+- **Global Dictation**: Press `⌥Space` from anywhere to start and stop recording
+- **Paste Into Any Focused Text Field**: Transcribed text is inserted into the active app using macOS accessibility input simulation
+- **On-Device Whisper**: Local speech-to-text powered by [`candle`](https://github.com/huggingface/candle) with Metal GPU acceleration
+- **Background Utility App**: Runs as a lightweight macOS agent-style app with [`LSUIElement`](app-ottex/build_macos.sh:59)
+- **Ambient Native UI**: Redesigned SwiftUI interface with an animated mesh-style background, hero status panel, transcript panel, and recent history
+- **Model Selection on First Run**: Choose a lighter or larger Whisper model tier depending on speed vs. accuracy
+- **Optional Provider Plumbing**: The Rust core still contains support scaffolding for LM Studio, OpenAI, Google, and OpenRouter workflows
 
-## Installation
+## Requirements
 
-### Prerequisites
+- macOS 13.0+
+- Apple Silicon Mac recommended
+- Rust toolchain
+- Microphone permission
+- Accessibility permission
 
-- Windows 10/11
-- Rust toolchain (for building from source)
+## Permissions Required
 
-### Building from Source
+Ottex currently needs only two macOS permissions:
+
+- **Microphone**: to capture speech
+- **Accessibility**: to insert transcribed text into the focused app
+
+Ottex does **not** currently require Input Monitoring or Apple Events for the implemented global hotkey path.
+
+## Build
+
+The project consists of the Rust library in [`app-ottex`](app-ottex) and the SwiftUI frontend in [`OttexSwiftUI`](OttexSwiftUI). Build the app bundle from the [`app-ottex`](app-ottex) directory:
+
+```bash
+./build_macos.sh
+open Ottex.app
+```
+
+For Rust-only work:
 
 ```bash
 cargo build --release
+cargo test
+cargo fmt --check
+cargo clippy -- -D warnings
 ```
 
-The executable will be at `target/release/ottex.exe`.
+## How It Works
 
-## Configuration
+1. Launch [`Ottex.app`](app-ottex/Ottex.app)
+2. Leave it running in the background
+3. Focus any text input in any macOS app
+4. Press `⌥Space` to start recording
+5. Press `⌥Space` again to stop and transcribe
+6. Ottex pastes the resulting text into the focused field
 
-On first run, a configuration file is created at:
-```
-%APPDATA%\ottex\Ottex\config.toml
-```
+The in-app interface also lets you:
 
-You can access it via the "Settings..." menu in the system tray.
+- review the latest transcript
+- copy or export text
+- view recent captures
+- pick a model tier on first launch
 
-### Configuration Options
+## Current Hotkey Behavior
 
-```toml
-[transcription]
-# Provider: "google", "openai", or "openrouter"
-provider = "openai"
+The current macOS implementation uses a Carbon global hotkey registered in [`GlobalHotkeyManager`](OttexSwiftUI/OttexSwiftUI/OttexEngineWrapper.swift:19). The active hotkey is:
 
-# API Keys (set at least one)
-google_api_key = ""
-openai_api_key = "sk-..."
-openrouter_api_key = ""
+- `⌥Space` — toggle recording on/off globally
 
-# Language for transcription
-language = "en-US"
+While the Rust config still contains generalized hotkey fields, the shipping macOS UI currently uses the hardcoded Carbon path above.
 
-[hotkeys]
-# Hotkey for voice recording
-record = "Alt+Space"
-# Hotkey for AI shortcuts
-ai_shortcut = "Ctrl+Shift+R"
+## Model Setup
 
-[ai_shortcuts]
-# Provider for AI text shortcuts: "openai" or "openrouter"
-provider = "openai"
-# Model to use
-model = "gpt-4o-mini"
-```
+On first run, Ottex asks you to choose a model tier:
 
-## Usage
+- **Light** — faster, smaller, lower accuracy
+- **Standard** — balanced default
+- **Maximum** — largest, highest accuracy
 
-1. **Start the app**: Run `ottex.exe` - it will appear in the system tray
-2. **Voice Recording**: Hold `Alt+Space`, speak, then release to transcribe
-3. **AI Shortcuts**: Select text in any app, press `Ctrl+Shift+R` to fix grammar
-4. **Settings**: Right-click tray icon and select "Settings..." to edit config
-5. **Quit**: Right-click tray icon and select "Quit"
+The selected tier maps to a Whisper repo and is loaded by [`OttexEngineWrapper`](OttexSwiftUI/OttexSwiftUI/OttexEngineWrapper.swift:155).
 
-## API Setup
+Model files are downloaded from Hugging Face and cached locally on first use.
 
-### OpenAI (Recommended)
+## Configuration Notes
 
-1. Get an API key from https://platform.openai.com/api-keys
-2. Add to config: `openai_api_key = "sk-..."`
+The Rust core still includes a broader configuration model in [`config.rs`](app-ottex/src/config.rs), including:
 
-### Google Speech-to-Text
+- embedded Whisper settings
+- local server URL support
+- cloud provider API key fields
+- AI shortcut settings
 
-1. Create a Google Cloud project
-2. Enable Speech-to-Text API
-3. Create an API key
-4. Add to config: `google_api_key = "..."`
+That configuration layer is not yet fully surfaced in the current SwiftUI product flow. For a public release, treat the current app as:
 
-### OpenRouter
-
-1. Get an API key from https://openrouter.ai/keys
-2. Add to config: `openrouter_api_key = "sk-or-..."`
+- **primary path**: embedded Whisper on-device transcription
+- **primary UX**: global `⌥Space` dictation
 
 ## Troubleshooting
 
-### Hotkeys not working
-- Make sure no other app is using the same hotkey combination
-- Try running as Administrator if targeting admin-level windows
+### Ottex does not type into other apps
 
-### Typing not working
-- Don't run the app as Administrator unless necessary (UIPI restrictions)
-- The target window must be focused when transcription completes
+- Grant Accessibility access in System Settings → Privacy & Security → Accessibility
+- Make sure the target app still has the text field focused when transcription finishes
+- If permission state seems stale, remove and re-add [`Ottex.app`](app-ottex/Ottex.app) in Accessibility and relaunch it
 
-### No audio captured
-- Check Windows microphone permissions for the app
-- Verify microphone is set as default input device
+### Global hotkey does not fire
 
-## Tech Stack
+- Make sure Ottex is still running in the background
+- `⌥Space` is registered through Carbon and should work without Input Monitoring
+- Relaunch the rebuilt signed bundle from [`app-ottex/Ottex.app`](app-ottex/Ottex.app)
 
-- **tray-icon**: System tray integration
-- **global-hotkey**: Global hotkey registration
-- **cpal**: Cross-platform audio capture
-- **hound**: WAV encoding
-- **reqwest**: HTTP client for API calls
-- **enigo**: Keyboard/mouse input simulation
-- **arboard**: Clipboard access
+### No audio is captured
+
+- Grant Microphone access in System Settings → Privacy & Security → Microphone
+- Check that the correct microphone is selected as the system input device
+
+### Model download or load fails
+
+- First run needs internet access to download model files
+- Ensure enough free disk space for the selected model tier
+- Cached model files live under the Ottex cache directory managed by [`ProjectDirs`](app-ottex/src/config.rs:217)
+
+## Architecture
+
+### Rust Core
+
+The Rust core in [`app-ottex/src`](app-ottex/src) handles:
+
+- audio capture via [`cpal`](app-ottex/Cargo.toml:11)
+- resampling via [`rubato`](app-ottex/Cargo.toml:46)
+- Whisper inference via [`candle-core`](app-ottex/Cargo.toml:39), [`candle-nn`](app-ottex/Cargo.toml:40), and [`candle-transformers`](app-ottex/Cargo.toml:41)
+- text insertion via [`enigo`](app-ottex/Cargo.toml:19)
+- UniFFI bindings for Swift integration
+
+### SwiftUI Frontend
+
+The SwiftUI app in [`OttexSwiftUI`](OttexSwiftUI) provides:
+
+- the redesigned ambient two-panel interface in [`ContentView`](OttexSwiftUI/OttexSwiftUI/ContentView.swift:272)
+- first-run model selection in [`ModelSetupView`](OttexSwiftUI/OttexSwiftUI/ContentView.swift:624)
+- the Carbon-based global hotkey manager in [`OttexEngineWrapper.swift`](OttexSwiftUI/OttexSwiftUI/OttexEngineWrapper.swift)
+
+## Repo Hygiene for Public GitHub Publishing
+
+Do not publish generated/local artifacts such as:
+
+- [`target/`](app-ottex/target)
+- [`Ottex.app`](app-ottex/Ottex.app)
+- generated files in [`bindings/`](app-ottex/bindings)
+- local planning docs or dumps
+
+Those are already covered by the updated [`.gitignore`](app-ottex/.gitignore).
 
 ## License
 

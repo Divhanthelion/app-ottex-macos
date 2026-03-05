@@ -3,11 +3,10 @@ name = "ottex"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
 [dependencies]
-# System tray
-tray-icon = "0.19"
-# Global hotkeys
-global-hotkey = "0.6"
 # Audio capture
 cpal = "0.15"
 # WAV encoding
@@ -33,12 +32,34 @@ toml = "0.8"
 # Logging
 log = "0.4"
 env_logger = "0.11"
-# Windows-specific event loop
-winit = "0.30"
+# Desktop notifications
+notify-rust = "4"
 
-[target.'cfg(windows)'.build-dependencies]
-winres = "0.1"
+# Embedded inference (candle + Whisper + LLM) - METAL backend
+candle-core = { version = "0.9", features = ["metal"] }
+candle-nn = { version = "0.9", features = ["metal"] }
+candle-transformers = "0.9"
+hf-hub = { version = "0.4", features = ["tokio"] }
+tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
+
+# Audio resampling
+rubato = "0.14"
+byteorder = "1.5"
+rand = "0.8"
+
+# Objective-C autorelease pool (Metal GPU memory management)
+objc2 = "0.6"
+
+# UniFFI bridging
+uniffi = { version = "0.28", features = ["cli"] }
+thiserror = "2.0.18"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
 
 [profile.release]
 opt-level = 3
 lto = true
+
+[lints.rust]
+dead_code = "allow"
