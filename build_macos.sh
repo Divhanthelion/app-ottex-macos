@@ -1,24 +1,36 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
+
+# Keep build artifacts inside this repo (ignore any inherited CARGO_TARGET_DIR).
+unset CARGO_TARGET_DIR
+export CARGO_TARGET_DIR="$ROOT_DIR/target"
 
 export MACOSX_DEPLOYMENT_TARGET=13.0
-export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-mmacosx-version-min=13.0"
+export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-mmacosx-version-min=13.0"
+
+if [[ "${CLEAN_BUILD:-0}" == "1" ]]; then
+  echo "=> Cleaning Rust build artifacts..."
+  cargo clean
+fi
 
 echo "=> Building Rust Core (Metal + Uniffi)..."
-cargo clean
 cargo build --release
 
 echo "=> Generating Swift Bindings..."
-cargo run --bin uniffi-bindgen generate src/ottex.udl --language swift --out-dir bindings
+mkdir -p bindings
+cargo run --bin uniffi-bindgen -- generate src/ottex.udl --language swift --out-dir bindings
 
 echo "=> Compiling SwiftUI Application natively without Xcode..."
 swiftc -o OttexApp \
     -target arm64-apple-macos13.0 \
     -import-objc-header bindings/ottexFFI.h \
     bindings/ottex.swift \
-    ../OttexSwiftUI/OttexSwiftUI/OttexSwiftUIApp.swift \
-    ../OttexSwiftUI/OttexSwiftUI/OttexEngineWrapper.swift \
-    ../OttexSwiftUI/OttexSwiftUI/ContentView.swift \
+    OttexSwiftUI/OttexSwiftUI/OttexSwiftUIApp.swift \
+    OttexSwiftUI/OttexSwiftUI/OttexEngineWrapper.swift \
+    OttexSwiftUI/OttexSwiftUI/ContentView.swift \
     target/release/libottex.a \
     -framework AudioUnit \
     -framework SystemConfiguration \

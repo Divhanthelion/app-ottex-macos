@@ -1,11 +1,3 @@
-# === Claude / AI ===
-.claude/
-context_prompt.txt
-*_context.txt
-*_codebase.txt
-tmpclaude-*
-codebase_dump.txt
-
 # === OS ===
 .DS_Store
 Thumbs.db
@@ -27,9 +19,8 @@ Desktop.ini
 # === Build outputs / packaged apps ===
 *.app/
 *.dSYM/
-bindings/*.swift
-bindings/*.h
-bindings/*.modulemap
+OttexApp
+bindings/
 
 # === Environment / Secrets ===
 .env
@@ -42,20 +33,16 @@ credentials.json
 *.keystore
 *.jks
 
-# === Markdown (except README) ===
-*.md
-!README.md
-
-# === Text files (except requirements) ===
-*.txt
-!requirements.txt
-!requirements-dev.txt
+# === Local planning / dumps ===
+.claude/
+plans/
+*.pdf
+codebase_dump.txt
+context_prompt.txt
+*_context.txt
+*_codebase.txt
+tmpclaude-*
 
 # === Rust ===
 target/
 **/*.rs.bk
-Cargo.lock
-
-# === Planning / local docs ===
-plans/
-*.pdf
